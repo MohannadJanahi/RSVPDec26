@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Wedding Check-in</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; background: #111; color: #fff; text-align: center; }
+    header { padding: 12px; background: #222; font-size: 18px; }
+    #reader { width: 100%; max-width: 420px; margin: 12px auto; min-height: 260px; background: #000; }
+    #result { margin: 12px; padding: 18px; border-radius: 12px; font-size: 20px; font-weight: 600; background: #333; }
+    #result.ok { background: #1b8a3a; }
+    #result.duplicate { background: #d98a00; }
+    #result.invalid { background: #c0392b; }
+    #result small { display: block; font-weight: 400; margin-top: 6px; font-size: 15px; }
+    button, .btn { background: #3b82f6; color: #fff; border: 0; border-radius: 10px; padding: 12px 18px;
+                   font-size: 16px; margin: 6px; display: inline-block; }
+    input[type=text] { padding: 12px; font-size: 16px; border-radius: 10px; border: 0; width: 120px; }
+    #cameraMsg { color: #ffb3b3; margin: 8px 16px; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <header>Wedding Check-in &nbsp;|&nbsp; <span id="stats">–</span></header>
+
+  <div id="reader"></div>
+  <div id="cameraMsg"></div>
+  <div id="result">Point the camera at a QR code</div>
+
+  <div>
+    <button id="restartBtn">Restart camera</button>
+    <label class="btn">Take photo
+      <input id="photoInput" type="file" accept="image/*" capture="environment" style="display:none">
+    </label>
+  </div>
+  <div style="margin-top:10px">
+    <input id="manual" type="text" inputmode="numeric" placeholder="Card #">
+    <button id="manualBtn">Check in</button>
+  </div>
+  <div id="fileReader" style="display:none"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+  <script>
+    // ====== EDIT THESE TWO LINES ======
+    const API = 'https://script.google.com/macros/s/AKfycbwinPTk2i3_z72oR0mECiSopIy9iZmQiGSImQT4EbecjSPYJIcrhnfcVVHr58tLrSHqYg/exec';
+    const KEY = 'UWrtq7eziwP1TI2AXKJo'; // same as SECRET
+    // ==================================
+
+    let scanner = null;
+    let busy = false;
+    let lastCode = '', lastTime = 0;
+
+    const resultEl = document.getElementById('result');
+    const msgEl = document.getElementById('cameraMsg');
+    const statsEl = document.getElementById('stats');
+
+    function feedback(status) {
+      if (navigator.vibrate) navigator.vibrate(status === 'ok' ? 150 : [200, 100, 200]);
+      try {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const o = ctx.createOscillator(); o.connect(ctx.destination);
+        o.frequency.value = status === 'ok' ? 880 : 300;
+        o.start(); setTimeout(() => { o.stop(); ctx.close(); }, status === 'ok' ? 120 : 400);
+      } catch (e) {}
+    }
+
+    function showResult(r) {
+      resultEl.className = r.status || 'invalid';
+      let html = r.message || 'Unexpected response';
+      if (r.status === 'ok') html += '<small>Checked in at ' + r.time + '</small>';
+      if (r.status === 'duplicate') html = '⚠️ ' + html + '<small>First check-in: ' + r.time + '</small>';
+      if (r.status === 'invalid') html = '❌ ' + html;
+      resultEl.innerHTML = html;
+      if (r.stats) updateStats(r.stats);
+      feedback(r.status);
+    }
+
+    function updateStats(s) {
+      if (s && typeof s.attended === 'number') {
+        statsEl.textContent = s.attended + ' / ' + s.total + ' arrived';
+      } else {
+        statsEl.textContent = 'Error: ' + ((s && s.message) || 'bad response');
+      }
+    }
+
+    function loadStats() {
+      fetch(API + '?action=stats&key=' + encodeURIComponent(KEY))
+        .then(r => r.json())
+        .then(updateStats)
+        .catch(e => { statsEl.textContent = 'Error: ' + e.message; });
+    }
+
+    function submitCode(code) {
+      busy = true;
+      resultEl.className = ''; resultEl.textContent = 'Checking…';
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 15000);
+      fetch(API + '?key=' + encodeURIComponent(KEY) + '&code=' + encodeURIComponent(code), { signal: ctrl.signal })
+        .then(r => r.json())
+        .then(r => { clearTimeout(timer); showResult(r); setTimeout(() => busy = false, 1500); })
+        .catch(e => {
+          clearTimeout(timer);
+          showResult({ status: 'invalid', message: 'Error: ' + (e.name === 'AbortError' ? 'timed out' : e.message) });
+          busy = false;
+        });
+    }
+
+    function onScan(text) {
+      const now = Date.now();
+      if (busy || (text === lastCode && now - lastTime < 4000)) return; // ignore repeats
+      lastCode = text; lastTime = now;
+      submitCode(text);
+    }
+
+    let starting = false;
+    async function startCamera() {
+      if (starting) return;            // ignore taps while a start is in progress
+      starting = true;
+      msgEl.textContent = '';
+      try {
+        if (scanner) {                 // fully tear down any previous instance
+          try { await scanner.stop(); } catch (e) {}
+          try { await scanner.clear(); } catch (e) {}
+          scanner = null;
+        }
+        scanner = new Html5Qrcode('reader');
+        await scanner.start(
+          { facingMode: 'environment' },
+          { fps: 10, qrbox: { width: 240, height: 240 } },
+          onScan,
+          () => {}
+        );
+      } catch (err) {
+        msgEl.textContent = 'Live camera unavailable (' + (err && err.message ? err.message : err) +
+          '). Reload the page, or use "Take photo" or type the number.';
+      } finally {
+        starting = false;
+      }
+    }
+
+    // Fallback: native camera app -> decode the photo
+    document.getElementById('photoInput').addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      try {
+        const fr = new Html5Qrcode('fileReader');
+        const text = await fr.scanFile(file, false);
+        submitCode(text);
+      } catch (err) {
+        showResult({ status: 'invalid', message: 'No QR code found in photo. Try again, closer and steady.' });
+      }
+      e.target.value = '';
+    });
+
+    document.getElementById('manualBtn').addEventListener('click', () => {
+      const v = document.getElementById('manual').value.trim();
+      if (v) { submitCode(v); document.getElementById('manual').value = ''; }
+    });
+    document.getElementById('restartBtn').addEventListener('click', startCamera);
+
+    // Startup
+    if (API.indexOf('YOUR_DEPLOYMENT_ID') !== -1) {
+      statsEl.textContent = 'Set API URL in index.html';
+    } else {
+      loadStats();
+    }
+    startCamera();
+  </script>
+</body>
+</html>
